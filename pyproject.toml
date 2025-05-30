@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "ltchiptool-esphome-ota"
-version = "1.3.0"
+version = "1.4.0"
 description = "ESPHome OTA uploader plugin for ltchiptool"
 authors = ["Kuba Szczodrzyński <kuba@szczodrzynski.pl>"]
 license = "MIT"
@@ -13,7 +13,7 @@ packages = [
 python = "^3.10"
 
 [tool.poetry.group.dev.dependencies]
-black = "^23.3.0"
+black = "^24.1.0"
 isort = "^5.12.0"
 autoflake = "^2.1.1"
 
