@@ -26,7 +26,9 @@ from ltchiptool.util.logging import verbose
 from ltchiptool.util.misc import sizeof
 from ltchiptool.util.streams import ClickProgressCallback
 
-OTA_MAGIC = b"\x6C\x26\xF7\x5C\x45"
+OTA_MAGIC = b"\x6c\x26\xf7\x5c\x45"
+UPLOAD_BLOCK_SIZE = 8192
+UPLOAD_BUFFER_SIZE = UPLOAD_BLOCK_SIZE * 8
 
 
 def tohex(data: bytes) -> str:
@@ -39,28 +41,31 @@ def tohex(data: bytes) -> str:
 class OTACode(IntEnum):
     RESP_OK = 0
     RESP_REQUEST_AUTH = 1
-    RESP_HEADER_OK = 64
-    RESP_AUTH_OK = 65
-    RESP_UPDATE_PREPARE_OK = 66
-    RESP_BIN_MD5_OK = 67
-    RESP_RECEIVE_OK = 68
-    RESP_UPDATE_END_OK = 69
-    RESP_SUPPORTS_COMPRESSION = 70
+    RESP_HEADER_OK = 0x40
+    RESP_AUTH_OK = 0x41
+    RESP_UPDATE_PREPARE_OK = 0x42
+    RESP_BIN_MD5_OK = 0x43
+    RESP_RECEIVE_OK = 0x44
+    RESP_UPDATE_END_OK = 0x45
+    RESP_SUPPORTS_COMPRESSION = 0x46
+    RESP_CHUNK_OK = 0x47
 
-    ERROR_MAGIC = 128
-    ERROR_UPDATE_PREPARE = 129
-    ERROR_AUTH_INVALID = 130
-    ERROR_WRITING_FLASH = 131
-    ERROR_UPDATE_END = 132
-    ERROR_INVALID_BOOTSTRAPPING = 133
-    ERROR_WRONG_CURRENT_FLASH_CONFIG = 134
-    ERROR_WRONG_NEW_FLASH_CONFIG = 135
-    ERROR_ESP8266_NOT_ENOUGH_SPACE = 136
-    ERROR_ESP32_NOT_ENOUGH_SPACE = 137
-    ERROR_NO_UPDATE_PARTITION = 138
-    ERROR_UNKNOWN = 255
+    ERROR_MAGIC = 0x80
+    ERROR_UPDATE_PREPARE = 0x81
+    ERROR_AUTH_INVALID = 0x82
+    ERROR_WRITING_FLASH = 0x83
+    ERROR_UPDATE_END = 0x84
+    ERROR_INVALID_BOOTSTRAPPING = 0x85
+    ERROR_WRONG_CURRENT_FLASH_CONFIG = 0x86
+    ERROR_WRONG_NEW_FLASH_CONFIG = 0x87
+    ERROR_ESP8266_NOT_ENOUGH_SPACE = 0x88
+    ERROR_ESP32_NOT_ENOUGH_SPACE = 0x89
+    ERROR_NO_UPDATE_PARTITION = 0x8A
+    ERROR_MD5_MISMATCH = 0x8B
+    ERROR_UNKNOWN = 0xFF
 
     VERSION_1_0 = 1
+    VERSION_2_0 = 2
     FEATURE_SUPPORTS_COMPRESSION = 0x01
 
 
@@ -118,7 +123,7 @@ class ESPHomeUploader:
             data = bytes([data])
         if isinstance(data, str):
             data = data.encode()
-        verbose(f"<-- TX: {tohex(data)}")
+        verbose(f"<-- TX: {tohex(data)[0:100]}")
         self.sock.sendall(data)
 
     def receive(self, *codes: OTACode, size: int = 0) -> Tuple[OTACode, bytes]:
@@ -141,7 +146,8 @@ class ESPHomeUploader:
 
         self.send(OTA_MAGIC)
         _, ver = self.receive(OTACode.RESP_OK, size=1)
-        if ver[0] != OTACode.VERSION_1_0:
+        ota_version = ver[0]
+        if ota_version not in (OTACode.VERSION_1_0, OTACode.VERSION_2_0):
             raise ValueError("Invalid OTA version")
         info("Connected to ESPHome")
 
@@ -198,32 +204,40 @@ class ESPHomeUploader:
         self.receive(OTACode.RESP_BIN_MD5_OK)
 
         self.sock.setsockopt(IPPROTO_TCP, TCP_NODELAY, 0)
-        self.sock.setsockopt(SOL_SOCKET, SO_SNDBUF, 8192)
+        self.sock.setsockopt(SOL_SOCKET, SO_SNDBUF, UPLOAD_BUFFER_SIZE)
         self.sock.settimeout(20.0)
 
         self.callback.on_message("Uploading firmware file")
         self.callback.on_total(self.file_size)
 
-        # allow receiving error codes during writing
-        self.sock.setblocking(False)
+        if ota_version < OTACode.VERSION_2_0:
+            # allow receiving error codes during writing
+            self.sock.setblocking(False)
+
         while True:
-            data = self.file.read(1024)
+            data = self.file.read(UPLOAD_BLOCK_SIZE)
             if not data:
                 break
-            while True:
-                try:
-                    data = self.sock.recv(1)
-                    code = OTACode(data[0])
-                    self.close()
-                    raise RuntimeError(f"Uploading failed: {code.name} ({code.value})")
-                except BlockingIOError:
-                    pass
+            if ota_version >= OTACode.VERSION_2_0:
+                self.send(data)
+                self.receive(OTACode.RESP_CHUNK_OK)
+            else:
+                while True:
+                    try:
+                        data = self.sock.recv(1)
+                        code = OTACode(data[0])
+                        self.close()
+                        raise RuntimeError(
+                            f"Uploading failed: {code.name} ({code.value})"
+                        )
+                    except BlockingIOError:
+                        pass
 
-                try:
-                    self.sock.sendall(data)
-                    break
-                except BlockingIOError:
-                    pass
+                    try:
+                        self.send(data)
+                        break
+                    except BlockingIOError:
+                        pass
             # sub loop breaks after successfully sending the current chunk
             self.callback.on_update(len(data))
         # main loop breaks after successfully sending the last chunk
