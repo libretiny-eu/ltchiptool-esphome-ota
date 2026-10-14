@@ -3,6 +3,7 @@
 import gzip
 import hashlib
 import os
+from _socket import gaierror
 from enum import IntEnum
 from io import BytesIO
 from logging import debug, info
@@ -20,7 +21,6 @@ from socket import (
 )
 from typing import IO, Tuple, Union
 
-from _socket import gaierror
 from ltchiptool.util.intbin import inttobe32
 from ltchiptool.util.logging import verbose
 from ltchiptool.util.misc import sizeof
